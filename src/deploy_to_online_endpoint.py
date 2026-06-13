@@ -1,6 +1,6 @@
 from azure.identity import DefaultAzureCredential
 from azure.ai.ml import MLClient
-from azure.ai.ml.entities import ManagedOnlineEndpoint, ManagedOnlineDeployment, Model
+from azure.ai.ml.entities import ManagedOnlineEndpoint, ManagedOnlineDeployment, Model, Environment
 from azure.ai.ml.constants import AssetTypes
 
 import argparse
@@ -45,6 +45,11 @@ def ensure_endpoint(ml_client: MLClient, endpoint_name: str) -> ManagedOnlineEnd
 
         return ml_client.begin_create_or_update(endpoint).result()
 
+environment = Environment(
+    image="mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04",
+    conda_file="./model/conda.yaml",
+    name="diabetes-deploy-env",
+)
 
 def create_or_update_deployment(
     ml_client: MLClient,
@@ -61,7 +66,7 @@ def create_or_update_deployment(
         name=deployment_name,
         endpoint_name=endpoint_name,
         model=model,
-        environment="azureml://registries/azureml/environments/sklearn-1.5/versions/latest",
+        environment=environment,
         instance_type="Standard_D2as_v4",
         instance_count=1,
     )
