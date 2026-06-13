@@ -61,6 +61,7 @@ def create_or_update_deployment(
         name=deployment_name,
         endpoint_name=endpoint_name,
         model=model,
+        environment="azureml://registries/azureml/environments/sklearn-1.5/versions/latest",
         instance_type="Standard_D2as_v4",
         instance_count=1,
     )
