@@ -52,7 +52,7 @@ def create_or_update_deployment(
     deployment_name: str,
 ) -> ManagedOnlineDeployment:
     
-    model = ml_client.models.create_or_update(Model(
+    registered_model = ml_client.models.create_or_update(Model(
         path="./model",
         type=AssetTypes.MLFLOW_MODEL,
         description="MLflow diabetes classification model",
