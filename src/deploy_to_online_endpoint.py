@@ -45,28 +45,33 @@ def ensure_endpoint(ml_client: MLClient, endpoint_name: str) -> ManagedOnlineEnd
 
         return ml_client.begin_create_or_update(endpoint).result()
 
-environment = Environment(
-    image="mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04",
-    conda_file="./model/conda.yaml",
-    name="diabetes-deploy-env",
-)
 
 def create_or_update_deployment(
     ml_client: MLClient,
     endpoint_name: str,
     deployment_name: str,
 ) -> ManagedOnlineDeployment:
-    model = Model(
+    
+    model = ml_client.models.create_or_update(Model(
         path="./model",
         type=AssetTypes.MLFLOW_MODEL,
         description="MLflow diabetes classification model",
-    )
+    ))
+    print(f"Registered model: {registered_model.name} v{registered_model.version}")
 
+    environment = Environment(
+    image="mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest",
+    conda_file="./model/conda.yaml",
+    name="diabetes-deploy-env",
+    )
+    registered_env = ml_client.environments.create_or_update(environment)
+    print(f"Environment: {registered_env.name} v{registered_env.version}")
+    
     deployment = ManagedOnlineDeployment(
         name=deployment_name,
         endpoint_name=endpoint_name,
-        model=model,
-        environment=environment,
+        model=registered_model,
+        environment=registered_env,
         instance_type="Standard_D2as_v4",
         instance_count=1,
     )
@@ -78,7 +83,10 @@ def set_traffic_to_deployment(ml_client: MLClient, endpoint_name: str, deploymen
     endpoint = ml_client.online_endpoints.get(name=endpoint_name)
     endpoint.traffic = {deployment_name: 100}
     ml_client.begin_create_or_update(endpoint).result()
-
+    return ml_client.online_deployments.get(
+        name=deployment_name,
+        endpoint_name=endpoint_name,
+    )
 
 def main() -> None:
     args = parse_args()
