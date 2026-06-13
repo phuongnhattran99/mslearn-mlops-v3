@@ -29,13 +29,16 @@ az configure --defaults workspace=$WORKSPACE_NAME
 
 # Create compute instance
 echo "Creating a compute instance with name: " $COMPUTE_INSTANCE
-az ml compute create --name ${COMPUTE_INSTANCE} --size STANDARD_DS11_V2 --type ComputeInstance 
+az ml compute create --name ${COMPUTE_INSTANCE} --size STANDARD_D2A_V4 --type ComputeInstance 
 
 # Create compute cluster
 echo "Creating a compute cluster with name: " $COMPUTE_CLUSTER
-az ml compute create --name ${COMPUTE_CLUSTER} --size STANDARD_DS11_V2 --max-instances 2 --type AmlCompute 
+az ml compute create --name ${COMPUTE_CLUSTER} --size STANDARD_E2D_V4 --max-instances 2 --type AmlCompute 
 
 # Create data assets
 echo "Create training data asset:"
 az ml data create --type mltable --name "diabetes-training" --path ../data/diabetes-data
 az ml data create --type uri_file --name "diabetes-data" --path ../data/diabetes-data/diabetes.csv 
+
+ az ml data create --type uri_folder --name "diabetes-dev-folder" --path ../experimentation/data
+ az ml data create --type uri_folder --name "diabetes-prod-folder" --path ../production/data
