@@ -68,7 +68,7 @@ jobs:
             --subscription-id "${{ steps.detect.outputs.subscription_id }}" \
             --resource-group "${{ steps.detect.outputs.resource_group }}" \
             --workspace "${{ steps.detect.outputs.workspace }}" \
-            --endpoint-name "diabetes-endpoint" \
+            --endpoint-name "diabetes-endpoint-05211030" \
             --deployment-name "blue"
 
       - name: Comment deployment result on pull request
