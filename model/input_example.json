@@ -1,0 +1,1 @@
+{"columns": ["Pregnancies", "PlasmaGlucose", "DiastolicBloodPressure", "TricepsThickness", "SerumInsulin", "BMI", "DiabetesPedigree", "Age"], "data": [[0, 93, 82, 30, 247, 20.16896055, 0.295155067, 24], [6, 147, 91, 42, 79, 21.29309658, 0.107699562, 22], [2, 112, 76, 28, 33, 41.10446847, 0.536948882, 45]]}
