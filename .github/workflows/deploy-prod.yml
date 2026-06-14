@@ -1,92 +1,169 @@
 name: Deploy model to online endpoint (PR comment)
 
+# ─────────────────────────────────────────────────────────────────
+# Trigger: comment "/deploy-prod" on any pull request
+# ─────────────────────────────────────────────────────────────────
 on:
   issue_comment:
     types: [created]
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-
 jobs:
-  deploy-prod:
-    if: >-
+  deploy-to-online-endpoint:
+    # ── Guard: only run on PR comments that contain the command ───
+    if: >
       github.event.issue.pull_request != null &&
       contains(github.event.comment.body, '/deploy-prod')
+
     runs-on: ubuntu-latest
-    environment: prod
+    environment: prod           # AZURE_CREDENTIALS secret lives here
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install Azure SDK dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install azure-ai-ml azure-identity
-
-      - name: Sign in to Azure
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Install Azure ML CLI
-        run: |
-          az extension add -n ml -y
-
-      - name: Detect Azure ML workspace
-        id: detect
-        run: |
-          RG_NAME=$(az group list --query "[?starts_with(name,'rg-ai300-l')].name | [0]" -o tsv)
-          if [ -z "$RG_NAME" ]; then
-            echo "No resource group starting with rg-ai300-l found." >&2
-            exit 1
-          fi
-
-          WS_NAME=$(az ml workspace list --resource-group "$RG_NAME" --query "[?starts_with(name,'mlw-ai300-l')].name | [0]" -o tsv)
-          if [ -z "$WS_NAME" ]; then
-            echo "No workspace starting with mlw-ai300-l found in $RG_NAME." >&2
-            exit 1
-          fi
-
-          SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-
-          echo "resource_group=$RG_NAME" >> "$GITHUB_OUTPUT"
-          echo "workspace=$WS_NAME" >> "$GITHUB_OUTPUT"
-          echo "subscription_id=$SUBSCRIPTION_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Deploy model to managed online endpoint
-        id: deploy
-        run: |
-          python src/deploy_to_online_endpoint.py \
-            --subscription-id "${{ steps.detect.outputs.subscription_id }}" \
-            --resource-group "${{ steps.detect.outputs.resource_group }}" \
-            --workspace "${{ steps.detect.outputs.workspace }}" \
-            --endpoint-name "diabetes-endpoint-05211030" \
-            --deployment-name "blue"
-
-      - name: Comment deployment result on pull request
+      # ── STEP 1: Get PR head SHA via API ───────────────────────────
+      # FIX #1: issue_comment events do NOT expose pull_request.head.sha
+      # directly. We must call the Pulls API to get the PR head commit.
+      - name: Get PR head SHA
+        id: pr
         uses: actions/github-script@v7
         with:
           script: |
-            const prNumber = context.issue.number;
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('head_ref', pr.head.ref);
+
+      # ── STEP 2: Checkout at the PR head commit ────────────────────
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.head_sha }}
+
+      # ── STEP 3: React to the trigger comment ─────────────────────
+      - name: React to trigger comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket'
+            });
+
+      # ── STEP 4: Azure login ───────────────────────────────────────
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ── STEP 5: Install Azure ML CLI extension ────────────────────
+      # FIX #2: This MUST come BEFORE "Detect workspace info"
+      # because that step calls `az ml workspace list`
+      - name: Install Azure ML CLI extension
+        run: az extension add --name ml --yes --only-show-errors
+
+      # ── STEP 6: Install Python SDK ────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip --quiet
+          pip install azure-ai-ml==1.16.0 azure-identity==1.17.1 --quiet
+
+      # ── STEP 7: Detect workspace created by infra/setup.sh ───────
+      # setup.sh creates: resource group = rg-ai300-<suffix>
+      #                   workspace      = mlw-ai300-<suffix>
+      - name: Detect workspace info
+        id: workspace                 # expose as step outputs (FIX #3)
+        run: |
+          SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+          RESOURCE_GROUP=$(
+            az group list \
+              --query "[?starts_with(name, 'rg-ai300')].name" \
+              -o tsv | head -1
+          )
+
+          WORKSPACE=$(
+            az ml workspace list \
+              --resource-group "$RESOURCE_GROUP" \
+              --query "[0].name" \
+              -o tsv
+          )
+
+          # ── Persist for later steps ──────────────────────────────
+          echo "SUBSCRIPTION_ID=$SUBSCRIPTION_ID" >> "$GITHUB_ENV"
+          echo "RESOURCE_GROUP=$RESOURCE_GROUP"   >> "$GITHUB_ENV"
+          echo "WORKSPACE=$WORKSPACE"             >> "$GITHUB_ENV"
+
+          # ── Also expose as step outputs for github-script ────────
+          echo "subscription_id=$SUBSCRIPTION_ID" >> "$GITHUB_OUTPUT"
+          echo "resource_group=$RESOURCE_GROUP"   >> "$GITHUB_OUTPUT"
+          echo "workspace=$WORKSPACE"             >> "$GITHUB_OUTPUT"
+
+          echo "Subscription  : $SUBSCRIPTION_ID"
+          echo "Resource group: $RESOURCE_GROUP"
+          echo "Workspace     : $WORKSPACE"
+
+      # ── STEP 8: Run deployment script ────────────────────────────
+      - name: Deploy model to online endpoint
+        id: deploy
+        run: |
+          python src/deploy_to_online_endpoint.py \
+            --subscription_id  "$SUBSCRIPTION_ID" \
+            --resource_group   "$RESOURCE_GROUP"  \
+            --workspace_name   "$WORKSPACE"       \
+            --endpoint_name    "diabetes-endpoint-20260614"  \
+            --deployment_name  blue
+
+      # ── STEP 9: Comment success result on the PR ─────────────────
+      # FIX #3: pass step outputs via env: so JS can read process.env
+      # FIX #4: use context.serverUrl / context.runId, NOT ${{ }} in JS
+      - name: Comment success on PR
+        if: success()
+        uses: actions/github-script@v7
+        env:
+          WS: ${{ steps.workspace.outputs.workspace }}
+          RG: ${{ steps.workspace.outputs.resource_group }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+        with:
+          script: |
+            const ws  = process.env.WS;
+            const rg  = process.env.RG;
+            const ref = process.env.HEAD_REF;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const body = [
-              '🚀 Deployment workflow completed.',
+              '## ✅ Deployment succeeded',
               '',
-              'The diabetes model has been deployed (or updated) on the managed online endpoint.',
+              '| Field | Value |',
+              '|---|---|',
+              `| Branch | \`${ref}\` |`,
+              `| Endpoint | \`diabetes-endpoint\` |`,
+              `| Deployment | \`blue\` |`,
+              `| Workspace | \`${ws}\` |`,
+              `| Resource group | \`${rg}\` |`,
+              `| Actions run | [View logs](${runUrl}) |`,
               '',
-              'Check the workflow run logs for the endpoint scoring URI and verify the endpoint in Azure Machine Learning studio.',
+              'Test the endpoint in **ML Studio → Endpoints → diabetes-endpoint → Test**.',
             ].join('\n');
 
             await github.rest.issues.createComment({
+              issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: prNumber,
-              body,
+              body
+            });
+
+      # ── STEP 10: Comment failure result on the PR ─────────────────
+      - name: Comment failure on PR
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ❌ Deployment failed\n\nCheck the [Actions run](${runUrl}) for details.`
             });
