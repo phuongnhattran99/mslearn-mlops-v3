@@ -1,15 +1,26 @@
-channels:
-- conda-forge
-dependencies:
-- python=3.10
-- pip
-- pip:
-  - mlflow==2.14.3
-  - cloudpickle==3.0.0
-  - numpy==1.26.4
-  - pandas==2.1.4
-  - joblib==1.3.2
-  - packaging==24.2
-  - pyyaml==6.0.3
-  - scikit-learn==1.3.2
+# conda.yaml — Inference environment for the diabetes MLflow model
+#
+# AML reads this file when deploying an MLFLOW_MODEL to auto-build
+# the Docker image. Python 3.10 requires Ubuntu 22.04 as the base
+# image (Ubuntu 20.04 only ships Python 3.8).
+#
+# ⚠  IMPORTANT: check scikit-learn version in model/MLmodel first:
+#       cat model/MLmodel | grep sklearn_version
+#    Then update the scikit-learn pin below to match exactly.
+
 name: mlflow-env
+channels:
+  - conda-forge       # required for Python 3.10 on ubuntu22.04
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - scikit-learn==1.3.2          # must match model/MLmodel sklearn_version
+    - numpy==1.26.4
+    - pandas==2.1.4
+    - joblib==1.3.2
+    - cloudpickle==3.0.0
+    - mlflow==2.14.3
+    - azureml-inference-server-http==0.8.3
+    - psutil>=5.8.0
