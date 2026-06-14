@@ -1,120 +1,195 @@
-from azure.identity import DefaultAzureCredential
-from azure.ai.ml import MLClient
-from azure.ai.ml.entities import ManagedOnlineEndpoint, ManagedOnlineDeployment, Model, Environment
-from azure.ai.ml.constants import AssetTypes
+"""
+Deploy an MLflow model to a Managed Online Endpoint in Azure Machine Learning.
 
+Usage:
+    python src/deploy_to_online_endpoint.py \
+        --subscription_id  <sub>  \
+        --resource_group   <rg>   \
+        --workspace_name   <ws>   \
+        --endpoint_name    diabetes-endpoint \
+        --deployment_name  blue
+"""
 import argparse
-import datetime
+import logging
+import os
+
+from azure.ai.ml import MLClient
+from azure.ai.ml.constants import AssetTypes
+from azure.ai.ml.entities import (
+    ManagedOnlineDeployment,
+    ManagedOnlineEndpoint,
+    Model,
+)
+from azure.identity import DefaultAzureCredential
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--subscription-id", dest="subscription_id", required=True)
-    parser.add_argument("--resource-group", dest="resource_group", required=True)
-    parser.add_argument("--workspace", dest="workspace", required=True)
-    parser.add_argument("--endpoint-name", dest="endpoint_name", default="diabetes-endpoint")
-    parser.add_argument("--deployment-name", dest="deployment_name", default="blue")
-
-    return parser.parse_args()
-
-
-def get_ml_client(subscription_id: str, resource_group: str, workspace: str) -> MLClient:
+# ──────────────────────────────────────────────────────────────────
+# 1. Connect to workspace
+# ──────────────────────────────────────────────────────────────────
+def get_ml_client(
+    subscription_id: str,
+    resource_group: str,
+    workspace_name: str,
+) -> MLClient:
     credential = DefaultAzureCredential()
-    return MLClient(
-        credential=credential,
-        subscription_id=subscription_id,
-        resource_group_name=resource_group,
-        workspace_name=workspace,
-    )
+    return MLClient(credential, subscription_id, resource_group, workspace_name)
 
 
-def ensure_endpoint(ml_client: MLClient, endpoint_name: str) -> ManagedOnlineEndpoint:
+# ──────────────────────────────────────────────────────────────────
+# 2. Ensure endpoint exists (create if not)
+# ──────────────────────────────────────────────────────────────────
+def create_or_update_endpoint(
+    ml_client: MLClient,
+    endpoint_name: str,
+) -> ManagedOnlineEndpoint:
+    """Create the endpoint if it does not exist; return the endpoint object."""
     try:
-        endpoint = ml_client.online_endpoints.get(name=endpoint_name)
-        return endpoint
+        endpoint = ml_client.online_endpoints.get(endpoint_name)
+        logger.info(f"Endpoint '{endpoint_name}' already exists — reusing.")
     except Exception:
-        unique_suffix = datetime.datetime.now().strftime("%m%d%H%M%f")
-        name = endpoint_name or f"endpoint-{unique_suffix}"
-
+        logger.info(f"Endpoint '{endpoint_name}' not found — creating ...")
         endpoint = ManagedOnlineEndpoint(
-            name=name,
-            description="Online endpoint for MLflow diabetes model",
+            name=endpoint_name,
+            description="Diabetes prediction real-time endpoint",
             auth_mode="key",
+            tags={"project": "mslearn-mlops"},
         )
+        endpoint = ml_client.online_endpoints.begin_create_or_update(endpoint).result()
+        logger.info(f"Endpoint '{endpoint_name}' created.")
 
-        return ml_client.begin_create_or_update(endpoint).result()
+    return endpoint
 
 
+# ──────────────────────────────────────────────────────────────────
+# 3. Register MLflow model + create / update deployment
+# ──────────────────────────────────────────────────────────────────
 def create_or_update_deployment(
     ml_client: MLClient,
     endpoint_name: str,
     deployment_name: str,
 ) -> ManagedOnlineDeployment:
-    
-    registered_model = ml_client.models.create_or_update(Model(
-        path="./model",
-        type=AssetTypes.MLFLOW_MODEL,
-        description="MLflow diabetes classification model",
-    ))
-    print(f"Registered model: {registered_model.name} v{registered_model.version}")
+    """
+    Register the MLflow model from the local ./model folder, then
+    create (or update) a managed online deployment.
 
-    environment = Environment(
-    image="mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest",
-    conda_file="./model/conda.yaml",
-    name="diabetes-deploy-env",
+    Key design decision:
+        For AssetTypes.MLFLOW_MODEL, Azure ML auto-infers the scoring
+        script and the inference environment directly from the model
+        artifacts (MLmodel + conda.yaml).  Passing an explicit
+        `environment=` or `code_configuration=` would fight with that
+        auto-inference and is NOT needed here.
+    """
+
+    # ── 3a. Register model ─────────────────────────────────────────
+    logger.info("Registering model from './model' ...")
+    registered_model = ml_client.models.create_or_update(
+        Model(
+            name="diabetes-model",
+            path="./model",                    # repo-root model/ folder
+            type=AssetTypes.MLFLOW_MODEL,      # tells AML this is MLflow
+            description="Diabetes classification MLflow model",
+        )
     )
-    registered_env = ml_client.environments.create_or_update(environment)
-    print(f"Environment: {registered_env.name} v{registered_env.version}")
-    
+    logger.info(
+        f"Registered model: '{registered_model.name}' v{registered_model.version}"
+    )
+
+    # ── 3b. Define deployment ──────────────────────────────────────
     deployment = ManagedOnlineDeployment(
         name=deployment_name,
         endpoint_name=endpoint_name,
         model=registered_model,
-        environment=registered_env,
-        instance_type="STANDARD_D2ADS_V5",
+        instance_type="Standard_DS3_v2",
         instance_count=1,
     )
 
-    return ml_client.online_deployments.begin_create_or_update(deployment).result()
+    logger.info(
+        f"Creating / updating deployment '{deployment_name}' "
+        f"on endpoint '{endpoint_name}' ..."
+    )
+    ml_client.online_deployments.begin_create_or_update(deployment).result()
 
-
-def set_traffic_to_deployment(ml_client: MLClient, endpoint_name: str, deployment_name: str) -> None:
-    endpoint = ml_client.online_endpoints.get(name=endpoint_name)
+    # ── 3c. Route 100 % of traffic to this deployment ─────────────
+    endpoint = ml_client.online_endpoints.get(endpoint_name)
     endpoint.traffic = {deployment_name: 100}
-    ml_client.begin_create_or_update(endpoint).result()
+    ml_client.online_endpoints.begin_create_or_update(endpoint).result()
+    logger.info(f"Traffic set: 100 % → '{deployment_name}'")
+
     return ml_client.online_deployments.get(
         name=deployment_name,
         endpoint_name=endpoint_name,
     )
 
+
+# ──────────────────────────────────────────────────────────────────
+# 4. Write GitHub Actions output (FIX #5: replace deprecated ::set-output)
+# ──────────────────────────────────────────────────────────────────
+def set_github_output(name: str, value: str) -> None:
+    """Write a step output using the modern $GITHUB_OUTPUT file API."""
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if github_output:
+        with open(github_output, "a") as f:
+            f.write(f"{name}={value}\n")
+    else:
+        # Running locally — just print
+        print(f"[output] {name}={value}")
+
+
+# ──────────────────────────────────────────────────────────────────
+# 5. Entry point
+# ──────────────────────────────────────────────────────────────────
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Deploy MLflow model to Azure ML Managed Online Endpoint"
+    )
+    parser.add_argument("--subscription_id", required=True)
+    parser.add_argument("--resource_group",  required=True)
+    parser.add_argument("--workspace_name",  required=True)
+    parser.add_argument("--endpoint_name",   default="diabetes-endpoint")
+    parser.add_argument("--deployment_name", default="blue")
+    return parser.parse_args()
+
+
 def main() -> None:
     args = parse_args()
 
-    print("Connecting to Azure Machine Learning workspace...")
+    logger.info("Connecting to Azure ML workspace ...")
     ml_client = get_ml_client(
-        subscription_id=args.subscription_id,
-        resource_group=args.resource_group,
-        workspace=args.workspace,
+        args.subscription_id,
+        args.resource_group,
+        args.workspace_name,
+    )
+    logger.info(
+        f"Connected → sub={args.subscription_id} "
+        f"| rg={args.resource_group} | ws={args.workspace_name}"
     )
 
-    print(f"Ensuring online endpoint '{args.endpoint_name}' exists...")
-    endpoint = ensure_endpoint(ml_client, args.endpoint_name)
-    print(f"Using endpoint: {endpoint.name}")
+    # ── Create / reuse endpoint ────────────────────────────────────
+    logger.info(f"Ensuring endpoint '{args.endpoint_name}' exists ...")
+    endpoint = create_or_update_endpoint(ml_client, args.endpoint_name)
 
-    print(f"Creating or updating deployment '{args.deployment_name}'...")
+    # ── Deploy model ───────────────────────────────────────────────
+    logger.info(f"Creating or updating deployment '{args.deployment_name}' ...")
     deployment = create_or_update_deployment(
         ml_client=ml_client,
         endpoint_name=endpoint.name,
         deployment_name=args.deployment_name,
     )
-    print(f"Deployment state: {deployment.provisioning_state}")
 
-    print("Directing 100% of traffic to the deployment...")
-    set_traffic_to_deployment(ml_client, endpoint.name, args.deployment_name)
+    # ── Print results ──────────────────────────────────────────────
+    scoring_uri = ml_client.online_endpoints.get(args.endpoint_name).scoring_uri
+    logger.info(f"Deployment state : {deployment.provisioning_state}")
+    logger.info(f"Scoring URI      : {scoring_uri}")
 
-    endpoint = ml_client.online_endpoints.get(name=endpoint.name)
-    print(f"Deployment complete. Scoring URI: {endpoint.scoring_uri}")
+    # FIX #5: use $GITHUB_OUTPUT instead of deprecated ::set-output
+    set_github_output("scoring_uri", scoring_uri)
+    set_github_output("deployment_state", deployment.provisioning_state)
 
 
 if __name__ == "__main__":
